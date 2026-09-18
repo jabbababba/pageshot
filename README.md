@@ -4,10 +4,16 @@ Capture a whole web page as a JPG, or as a PDF containing real selectable text.
 
 ## Install
 
-1. Open `chrome://extensions`
-2. Turn on **Developer mode** (top right)
-3. **Load unpacked**, and choose this folder
-4. Pin Pageshot to the toolbar
+1. Download the code: click the green **Code** button at
+   <https://github.com/jabbababba/pageshot> and choose **Download ZIP**, then
+   unzip it. (Or `git clone https://github.com/jabbababba/pageshot.git`.)
+2. Open `chrome://extensions`
+3. Turn on **Developer mode** (top right)
+4. **Load unpacked**, and choose the unzipped folder
+5. Pin Pageshot to the toolbar
+
+Chrome will ask you to approve the **debugger** permission. See the first note
+below for why it is needed.
 
 ## Use
 
