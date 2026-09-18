@@ -11,6 +11,8 @@ import { toUserMessage } from "../lib/errors.js";
 import { withDebugger, PROTOCOL_VERSION } from "../lib/cdp.js";
 import { getMetrics, primeLazyContent, captureBands, captureJpegs } from "../lib/capture.js";
 import { A4, readStream, printPdf } from "../lib/pdf.js";
+import { saveDataUrl, saveAll } from "../lib/download.js";
+import { runCapture } from "../background.js";
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = "") => {
@@ -321,6 +323,96 @@ function fakePdfSend(bytes, size = 7) {
      [p.marginTop, p.marginBottom, p.marginLeft, p.marginRight].every((m) => m === 0.394));
   ok("streams rather than returning one giant payload",
      p.transferMode === "ReturnAsStream", String(p.transferMode));
+}
+
+
+console.log("\nDownloads");
+
+{
+  const asked = [];
+  const api = { download: async (opts) => { asked.push(opts); return asked.length; } };
+  await saveDataUrl("a.jpg", "data:image/jpeg;base64,AAAA", api);
+  ok("passes the filename through", asked[0].filename === "a.jpg");
+  ok("passes the data url as the download url",
+     asked[0].url === "data:image/jpeg;base64,AAAA");
+  ok("does not open a save dialog", asked[0].saveAs === false);
+
+  const ids = await saveAll(["a.jpg", "b.jpg"], ["data:x", "data:y"], api);
+  ok("saves every file", ids.length === 2 && asked.length === 3, JSON.stringify(ids));
+}
+
+console.log("\nOrchestration");
+
+// Minimal doubles for everything runCapture reaches for.
+function deps({ jpegs = ["data:image/jpeg;base64,AAAA"], pdf = "data:application/pdf;base64,BBBB",
+                capture = null, detachLog = [] } = {}) {
+  return {
+    withDebugger: async (tabId, fn) => {
+      try { return await fn(async () => ({})); }
+      finally { detachLog.push("detached"); }
+    },
+    captureJpegs: capture || (async () => jpegs),
+    printPdf: async () => pdf,
+    saveAll: async (names) => names.map((_, i) => i),
+    now: () => new Date(2026, 8, 18, 14, 32),
+    detachLog,
+  };
+}
+
+{
+  const d = deps();
+  const r = await runCapture({
+    tabId: 1, url: "https://www.example.com/a", title: "How to Fix a Bike",
+    format: "jpg", deps: d,
+  });
+  ok("jpg capture succeeds", r.ok === true, JSON.stringify(r));
+  eq("names the single jpg correctly", r.files,
+     ["example.com-how-to-fix-a-bike-260918-1432.jpg"]);
+}
+
+{
+  const d = deps({ jpegs: ["data:a", "data:b", "data:c"] });
+  const r = await runCapture({
+    tabId: 1, url: "https://example.com/a", title: "Long", format: "jpg", deps: d,
+  });
+  eq("numbers multi-file jpg captures", r.files,
+     ["example.com-long-260918-1432-1of3.jpg",
+      "example.com-long-260918-1432-2of3.jpg",
+      "example.com-long-260918-1432-3of3.jpg"]);
+}
+
+{
+  const d = deps();
+  const r = await runCapture({
+    tabId: 1, url: "https://example.com/a", title: "Long", format: "pdf", deps: d,
+  });
+  eq("pdf capture names one file", r.files, ["example.com-long-260918-1432.pdf"]);
+}
+
+{
+  const d = deps();
+  const r = await runCapture({
+    tabId: 1, url: "chrome://extensions", title: "Extensions", format: "jpg", deps: d,
+  });
+  ok("blocked pages fail before attaching", r.ok === false);
+  ok("blocked pages explain themselves", /doesn't allow/i.test(r.error), r.error);
+  ok("blocked pages never attach the debugger", d.detachLog.length === 0);
+}
+
+{
+  const detachLog = [];
+  const d = deps({
+    detachLog,
+    capture: async () => { throw new Error("Inspected target navigated or closed"); },
+  });
+  const r = await runCapture({
+    tabId: 1, url: "https://example.com/a", title: "X", format: "jpg", deps: d,
+  });
+  ok("a mid-capture failure is reported, not thrown", r.ok === false, JSON.stringify(r));
+  ok("the failure is translated for a human",
+     /tab changed or closed/i.test(r.error), r.error);
+  ok("THE DEBUGGER IS STILL DETACHED AFTER A FAILURE",
+     detachLog.length === 1, JSON.stringify(detachLog));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
