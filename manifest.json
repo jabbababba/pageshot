@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Pageshot",
+  "version": "1.0.0",
+  "description": "Capture a whole page as a JPG, or as a PDF with real selectable text.",
+  "permissions": ["debugger", "downloads", "activeTab"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Pageshot", "default_popup": "popup.html" }
+}
