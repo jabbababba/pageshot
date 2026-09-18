@@ -4,6 +4,6 @@
   "type": "module",
   "version": "1.0.0",
   "scripts": {
-    "test": "node test/pageshot.test.js"
+    "test": "node test/pageshot.test.js && node test/smoke.test.js"
   }
 }

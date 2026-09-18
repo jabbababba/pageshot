@@ -32,7 +32,14 @@ in your Downloads folder, named like
 ## Tests
 
 ```bash
-node test/pageshot.test.js
+npm test
 ```
+
+That runs two suites, neither of which needs a browser:
+
+- `test/pageshot.test.js` unit-tests each module against a fake debugger.
+- `test/smoke.test.js` drives the whole pipeline end to end with real JPEG and
+  PDF bytes, writes the files a download would produce, and checks they are
+  valid and byte-identical to the originals.
 
 No dependencies and no build step.
