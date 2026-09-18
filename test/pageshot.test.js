@@ -8,6 +8,7 @@ import { MAX_BAND, planBands } from "../lib/plan.js";
 import { slugify, hostOf, stamp, buildFilenames } from "../lib/name.js";
 import { checkUrl } from "../lib/guard.js";
 import { toUserMessage } from "../lib/errors.js";
+import { withDebugger, PROTOCOL_VERSION } from "../lib/cdp.js";
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = "") => {
@@ -110,6 +111,73 @@ ok("unknown errors pass their message through",
    toUserMessage(new Error("kaboom")) === "kaboom");
 ok("empty errors still say something",
    toUserMessage(undefined).length > 0, toUserMessage(undefined));
+
+
+console.log("\nDebugger session");
+
+// A stand-in for chrome.debugger that records everything it is asked to do.
+function fakeDebugger({ attachError = null, sendResults = {}, detachError = null } = {}) {
+  const log = [];
+  return {
+    log,
+    async attach(target, version) {
+      log.push(["attach", target.tabId, version]);
+      if (attachError) throw attachError;
+    },
+    async sendCommand(target, method, params) {
+      log.push(["send", method, params]);
+      const r = sendResults[method];
+      if (r instanceof Error) throw r;
+      return typeof r === "function" ? r(params) : (r ?? {});
+    },
+    async detach(target) {
+      log.push(["detach", target.tabId]);
+      if (detachError) throw detachError;
+    },
+  };
+}
+
+const names = (dbg) => dbg.log.map((e) => e[0]);
+
+{
+  const dbg = fakeDebugger({ sendResults: { "Page.enable": {} } });
+  const result = await withDebugger(7, async (send) => {
+    await send("Page.enable");
+    return "done";
+  }, dbg);
+  ok("returns the callback result", result === "done", String(result));
+  eq("attaches, sends, then detaches", names(dbg), ["attach", "send", "detach"]);
+  ok("attaches with protocol 1.3", dbg.log[0][2] === PROTOCOL_VERSION, dbg.log[0][2]);
+  ok("attaches to the right tab", dbg.log[0][1] === 7);
+}
+
+{
+  const dbg = fakeDebugger();
+  let thrown = null;
+  try {
+    await withDebugger(7, async () => { throw new Error("capture blew up"); }, dbg);
+  } catch (e) { thrown = e; }
+  ok("rethrows the callback error", thrown && thrown.message === "capture blew up");
+  ok("DETACHES EVEN WHEN THE CALLBACK THROWS", names(dbg).includes("detach"),
+     JSON.stringify(names(dbg)));
+}
+
+{
+  const dbg = fakeDebugger({ attachError: new Error("Another debugger is already attached") });
+  let thrown = null;
+  try {
+    await withDebugger(7, async () => "never runs", dbg);
+  } catch (e) { thrown = e; }
+  ok("propagates the attach failure", thrown && /Another debugger/.test(thrown.message));
+  ok("does not detach when attach never succeeded", !names(dbg).includes("detach"),
+     JSON.stringify(names(dbg)));
+}
+
+{
+  const dbg = fakeDebugger({ detachError: new Error("No tab with given id") });
+  const result = await withDebugger(7, async () => "fine", dbg);
+  ok("a failing detach does not mask a good result", result === "fine", String(result));
+}
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
