@@ -9,6 +9,7 @@ import { slugify, hostOf, stamp, buildFilenames } from "../lib/name.js";
 import { checkUrl } from "../lib/guard.js";
 import { toUserMessage } from "../lib/errors.js";
 import { withDebugger, PROTOCOL_VERSION } from "../lib/cdp.js";
+import { getMetrics, primeLazyContent, captureBands, captureJpegs } from "../lib/capture.js";
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = "") => {
@@ -177,6 +178,80 @@ const names = (dbg) => dbg.log.map((e) => e[0]);
   const dbg = fakeDebugger({ detachError: new Error("No tab with given id") });
   const result = await withDebugger(7, async () => "fine", dbg);
   ok("a failing detach does not mask a good result", result === "fine", String(result));
+}
+
+
+console.log("\nJPEG capture");
+
+// Records the CDP conversation and answers the three commands capture uses.
+function fakeSend({ contentHeight = 5000, contentWidth = 1280, viewportHeight = 900 } = {}) {
+  const calls = [];
+  const send = async (method, params = {}) => {
+    calls.push({ method, params });
+    if (method === "Page.getLayoutMetrics") {
+      return {
+        cssContentSize: { x: 0, y: 0, width: contentWidth, height: contentHeight },
+        cssLayoutViewport: { clientWidth: contentWidth, clientHeight: viewportHeight },
+      };
+    }
+    if (method === "Page.captureScreenshot") return { data: "AAAA" };
+    return {};
+  };
+  send.calls = calls;
+  send.of = (m) => calls.filter((c) => c.method === m);
+  return send;
+}
+
+const noSleep = async () => {};
+
+{
+  const send = fakeSend({ contentHeight: 5000.4, contentWidth: 1280.6, viewportHeight: 900 });
+  const m = await getMetrics(send);
+  eq("metrics are read and rounded up", m, { width: 1281, height: 5001, viewportHeight: 900 });
+}
+
+{
+  const send = fakeSend();
+  await primeLazyContent(send, { height: 2700, viewportHeight: 900 }, noSleep);
+  const evals = send.of("Runtime.evaluate").map((c) => c.params.expression);
+  ok("scrolls down through the page in viewport steps",
+     evals.filter((e) => /scrollTo\(0, \d+\)/.test(e)).length >= 3, JSON.stringify(evals));
+  ok("returns to the top afterwards",
+     evals[evals.length - 1] === "window.scrollTo(0, 0)", evals[evals.length - 1]);
+}
+
+{
+  const send = fakeSend();
+  const bands = planBands(40000);
+  const seen = [];
+  const urls = await captureBands(send, {
+    width: 1280, bands, onProgress: (i, n) => seen.push([i, n]),
+  });
+
+  ok("one image per band", urls.length === 3, String(urls.length));
+  ok("images are jpeg data urls",
+     urls.every((u) => u.startsWith("data:image/jpeg;base64,AAAA")), urls[0]);
+  eq("progress is reported per band", seen, [[1, 3], [2, 3], [3, 3]]);
+
+  const shots = send.of("Page.captureScreenshot").map((c) => c.params);
+  ok("every shot captures beyond the viewport",
+     shots.every((p) => p.captureBeyondViewport === true));
+  ok("every shot is jpeg at quality 90",
+     shots.every((p) => p.format === "jpeg" && p.quality === 90));
+  eq("clips are page-absolute and tile the page",
+     shots.map((p) => [p.clip.y, p.clip.height]),
+     [[0, 16384], [16384, 16384], [32768, 7232]]);
+  ok("clips use scale 1 and full width",
+     shots.every((p) => p.clip.scale === 1 && p.clip.width === 1280 && p.clip.x === 0));
+}
+
+{
+  const send = fakeSend({ contentHeight: 3000 });
+  const urls = await captureJpegs(send, { sleep: noSleep });
+  ok("full pipeline returns one file for a short page", urls.length === 1, String(urls.length));
+  ok("pipeline primes lazy content before capturing",
+     send.calls.findIndex((c) => c.method === "Runtime.evaluate") <
+     send.calls.findIndex((c) => c.method === "Page.captureScreenshot"));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
