@@ -10,6 +10,7 @@ import { checkUrl } from "../lib/guard.js";
 import { toUserMessage } from "../lib/errors.js";
 import { withDebugger, PROTOCOL_VERSION } from "../lib/cdp.js";
 import { getMetrics, primeLazyContent, captureBands, captureJpegs } from "../lib/capture.js";
+import { A4, readStream, printPdf } from "../lib/pdf.js";
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = "") => {
@@ -252,6 +253,74 @@ const noSleep = async () => {};
   ok("pipeline primes lazy content before capturing",
      send.calls.findIndex((c) => c.method === "Runtime.evaluate") <
      send.calls.findIndex((c) => c.method === "Page.captureScreenshot"));
+}
+
+
+console.log("\nPDF printing");
+
+// Serve `bytes` through IO.read in chunks of `size`, base64 per chunk, which
+// is what Chrome actually does and where naive string concatenation breaks.
+function fakePdfSend(bytes, size = 7) {
+  const calls = [];
+  let offset = 0;
+  const send = async (method, params = {}) => {
+    calls.push({ method, params });
+    if (method === "Page.printToPDF") return { stream: "handle-1" };
+    if (method === "IO.read") {
+      const slice = bytes.subarray(offset, offset + size);
+      offset += slice.length;
+      return {
+        data: Buffer.from(slice).toString("base64"),
+        base64Encoded: true,
+        eof: offset >= bytes.length,
+      };
+    }
+    return {};
+  };
+  send.calls = calls;
+  send.of = (m) => calls.filter((c) => c.method === m);
+  return send;
+}
+
+{
+  // 50 bytes at 7 per chunk guarantees padded intermediate chunks.
+  const original = Uint8Array.from({ length: 50 }, (_, i) => (i * 7) % 256);
+  const send = fakePdfSend(original, 7);
+  const bytes = await readStream(send, "handle-1");
+  ok("reassembles multi-chunk streams byte for byte",
+     Buffer.compare(Buffer.from(bytes), Buffer.from(original)) === 0,
+     bytes.length + " bytes");
+  ok("closes the stream handle", send.of("IO.close").length === 1);
+  ok("closes the handle it was given",
+     send.of("IO.close")[0].params.handle === "handle-1");
+}
+
+{
+  const original = Uint8Array.from([1, 2, 3]);
+  const send = fakePdfSend(original, 1024);
+  const bytes = await readStream(send, "handle-1");
+  ok("handles a single-chunk stream",
+     Buffer.compare(Buffer.from(bytes), Buffer.from(original)) === 0);
+}
+
+{
+  const original = Uint8Array.from({ length: 30 }, (_, i) => i);
+  const send = fakePdfSend(original, 8);
+  const url = await printPdf(send);
+
+  ok("returns a pdf data url", url.startsWith("data:application/pdf;base64,"), url.slice(0, 40));
+  ok("the data url decodes back to the original bytes",
+     Buffer.compare(Buffer.from(url.split(",")[1], "base64"), Buffer.from(original)) === 0);
+
+  const p = send.of("Page.printToPDF")[0].params;
+  ok("prints backgrounds", p.printBackground === true);
+  ok("prefers CSS page size", p.preferCSSPageSize === true);
+  ok("uses A4", p.paperWidth === 8.27 && p.paperHeight === 11.69,
+     p.paperWidth + "x" + p.paperHeight);
+  ok("uses 10mm margins",
+     [p.marginTop, p.marginBottom, p.marginLeft, p.marginRight].every((m) => m === 0.394));
+  ok("streams rather than returning one giant payload",
+     p.transferMode === "ReturnAsStream", String(p.transferMode));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
